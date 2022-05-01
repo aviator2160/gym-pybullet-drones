@@ -26,6 +26,9 @@ import numpy as np
 import pybullet as p
 import matplotlib.pyplot as plt
 
+import sys
+sys.path.append('./')
+
 from gym_pybullet_drones.envs.BaseAviary import DroneModel, Physics
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.envs.VisionAviary import VisionAviary
