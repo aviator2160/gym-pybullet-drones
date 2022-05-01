@@ -20,6 +20,17 @@ class DroneModel(Enum):
     CF2P = "cf2p"   # Bitcraze Craziflie 2.0 in the + configuration
     HB = "hb"       # Generic quadrotor (with AscTec Hummingbird inertial properties)
 
+class BoxModel():
+    def __init__(self, mass, dims, hardpoints):
+        self.mass = mass
+        self.dims = dims
+        self.hardpoints = hardpoints
+        squared_dims = np.square(dims)
+        self.J = mass / 12 * (np.eye(3) * np.sum(squared_dims) - np.diag(squared_dims))
+
+    def makeCollider():
+        pass
+
 ################################################################################
 
 class Physics(Enum):
@@ -44,6 +55,14 @@ class ImageType(Enum):
 
 ################################################################################
 
+class Joint:
+    
+    def __init__(self, hardpoint, drone):
+        self.HARDPOINT = hardpoint
+        self.DRONE = drone
+
+################################################################################
+
 class BaseAviary(gym.Env):
     """Base class for "drone aviary" Gym environments."""
 
@@ -54,9 +73,14 @@ class BaseAviary(gym.Env):
     def __init__(self,
                  drone_model: DroneModel=DroneModel.CF2X,
                  num_drones: int=1,
+                 num_loads: int=0,
                  neighbourhood_radius: float=np.inf,
                  initial_xyzs=None,
                  initial_rpys=None,
+                 load_dims=None,
+                 load_hardpoints=None,
+                 load_masses=None,
+                 joints: Joint=None,
                  physics: Physics=Physics.PYB,
                  freq: int=240,
                  aggregate_phy_steps: int=1,
@@ -75,12 +99,18 @@ class BaseAviary(gym.Env):
             The desired drone type (detailed in an .urdf file in folder `assets`).
         num_drones : int, optional
             The desired number of drones in the aviary.
+        num_loads : int, optional
+            The desired number of payloads in the aviary.
         neighbourhood_radius : float, optional
             Radius used to compute the drones' adjacency matrix, in meters.
         initial_xyzs: ndarray | None, optional
             (NUM_DRONES, 3)-shaped array containing the initial XYZ position of the drones.
         initial_rpys: ndarray | None, optional
             (NUM_DRONES, 3)-shaped array containing the initial orientations of the drones (in radians).
+        load_dims: ndarray | None, optional
+            (NUM_LOADS, 3)-shaped array containing the xyz-dimensions of the loads in meters.
+        initial_hardpoints: ndarray | None, optional
+            (NUM_LOADS, 3)-shaped array containing the positions of the load hardpoints in meters, w.r.t their centers.
         physics : Physics, optional
             The desired implementation of PyBullet physics/custom dynamics.
         freq : int, optional
@@ -108,8 +138,16 @@ class BaseAviary(gym.Env):
         self.SIM_FREQ = freq
         self.TIMESTEP = 1./self.SIM_FREQ
         self.AGGR_PHY_STEPS = aggregate_phy_steps
+        #### Defaults ##############################################
+        default_load_dims = np.array([0.5, 0.5, 0.1])
+        default_hardpoints = np.array([[ 0.5,  0.5, 0.1],
+                              [-0.5,  0.5, 0.1],
+                              [-0.5, -0.5, 0.1],
+                              [ 0.5, -0.5 ,0.1]])
         #### Parameters ############################################
         self.NUM_DRONES = num_drones
+        self.NUM_LOADS = num_loads
+        self.NUM_OBJS = num_drones + num_loads
         self.NEIGHBOURHOOD_RADIUS = neighbourhood_radius
         #### Options ###############################################
         self.DRONE_MODEL = drone_model
@@ -220,21 +258,42 @@ class BaseAviary(gym.Env):
                                                             nearVal=0.1,
                                                             farVal=1000.0
                                                             )
-        #### Set initial poses #####################################
+        #### Set initial drone poses #####################################
         if initial_xyzs is None:
+            raise NotImplementedError("No default positions for loads yet")
             self.INIT_XYZS = np.vstack([np.array([x*4*self.L for x in range(self.NUM_DRONES)]), \
                                         np.array([y*4*self.L for y in range(self.NUM_DRONES)]), \
                                         np.ones(self.NUM_DRONES) * (self.COLLISION_H/2-self.COLLISION_Z_OFFSET+.1)]).transpose().reshape(self.NUM_DRONES, 3)
-        elif np.array(initial_xyzs).shape == (self.NUM_DRONES,3):
+        elif np.array(initial_xyzs).shape == (self.NUM_OBJS,3):
             self.INIT_XYZS = initial_xyzs
         else:
-            print("[ERROR] invalid initial_xyzs in BaseAviary.__init__(), try initial_xyzs.reshape(NUM_DRONES,3)")
+            print("[ERROR] invalid initial_xyzs in BaseAviary.__init__(), try initial_xyzs.reshape(NUM_OBJS,3)")
         if initial_rpys is None:
-            self.INIT_RPYS = np.zeros((self.NUM_DRONES, 3))
-        elif np.array(initial_rpys).shape == (self.NUM_DRONES, 3):
+            self.INIT_RPYS = np.zeros((self.NUM_OBJS, 3))
+        elif np.array(initial_rpys).shape == (self.NUM_OBJS, 3):
             self.INIT_RPYS = initial_rpys
         else:
-            print("[ERROR] invalid initial_rpys in BaseAviary.__init__(), try initial_rpys.reshape(NUM_DRONES,3)")
+            print("[ERROR] invalid initial_rpys in BaseAviary.__init__(), try initial_rpys.reshape(NUM_OBJS,3)")
+        #### Set initial load dimensions #################################
+        # TODO: Better defaults
+        if load_dims is None:
+            if self.NUM_LOADS > 0:
+                self.LOAD_DIMS = np.array([default_load_dims for i in range(self.NUM_LOADS)])
+            else:
+                self.LOAD_DIMS = np.array([[]])
+        else:
+            self.LOAD_DIMS = load_dims
+        if load_hardpoints is None:
+            if self.NUM_LOADS > 0:
+                self.LOAD_HARDPOINTS = [default_hardpoints for i in range(self.NUM_LOADS)]
+            else:
+                self.LOAD_HARDPOINTS = np.array([[[]]])
+        else:
+            self.LOAD_HARDPOINTS = load_hardpoints
+        if load_masses is None:
+            self.LOAD_MASSES = np.product(self.LOAD_DIMS, axis=1)
+        else:
+            self.LOAD_MASSES = load_masses
         #### Create action and observation spaces ##################
         self.action_space = self._actionSpace()
         self.observation_space = self._observationSpace()
@@ -458,23 +517,23 @@ class BaseAviary(gym.Env):
         self.RESET_TIME = time.time()
         self.step_counter = 0
         self.first_render_call = True
-        self.X_AX = -1*np.ones(self.NUM_DRONES)
-        self.Y_AX = -1*np.ones(self.NUM_DRONES)
-        self.Z_AX = -1*np.ones(self.NUM_DRONES)
-        self.GUI_INPUT_TEXT = -1*np.ones(self.NUM_DRONES)
+        self.X_AX = -1*np.ones(self.NUM_DRONES)             # TODO: graphs for loads + load controls
+        self.Y_AX = -1*np.ones(self.NUM_DRONES)             # |
+        self.Z_AX = -1*np.ones(self.NUM_DRONES)             # |
+        self.GUI_INPUT_TEXT = -1*np.ones(self.NUM_DRONES)   # |
         self.USE_GUI_RPM=False
         self.last_input_switch = 0
-        self.last_action = -1*np.ones((self.NUM_DRONES, 4))
-        self.last_clipped_action = np.zeros((self.NUM_DRONES, 4))
+        self.last_action = -1*np.ones((self.NUM_DRONES, 4))         # TODO: actions for loads
+        self.last_clipped_action = np.zeros((self.NUM_DRONES, 4))   # |
         self.gui_input = np.zeros(4)
         #### Initialize the drones kinemaatic information ##########
-        self.pos = np.zeros((self.NUM_DRONES, 3))
-        self.quat = np.zeros((self.NUM_DRONES, 4))
-        self.rpy = np.zeros((self.NUM_DRONES, 3))
-        self.vel = np.zeros((self.NUM_DRONES, 3))
-        self.ang_v = np.zeros((self.NUM_DRONES, 3))
+        self.pos = np.zeros((self.NUM_OBJS, 3))
+        self.quat = np.zeros((self.NUM_OBJS, 4))
+        self.rpy = np.zeros((self.NUM_OBJS, 3))
+        self.vel = np.zeros((self.NUM_OBJS, 3))
+        self.ang_v = np.zeros((self.NUM_OBJS, 3))
         if self.PHYSICS == Physics.DYN:
-            self.rpy_rates = np.zeros((self.NUM_DRONES, 3))
+            self.rpy_rates = np.zeros((self.NUM_OBJS, 3))
         #### Set PyBullet's parameters #############################
         p.setGravity(0, 0, -self.G, physicsClientId=self.CLIENT)
         p.setRealTimeSimulation(0, physicsClientId=self.CLIENT)
@@ -488,6 +547,20 @@ class BaseAviary(gym.Env):
                                               flags = p.URDF_USE_INERTIA_FROM_FILE,
                                               physicsClientId=self.CLIENT
                                               ) for i in range(self.NUM_DRONES)])
+        self.LOAD_COLLIDERS = np.array([p.createCollisionShape(p.GEOM_BOX,
+                                                               halfExtents = self.LOAD_DIMS[i, :]/2,
+                                                              ) for i in range(self.NUM_LOADS)])
+        self.LOAD_IDS = np.array([p.createMultiBody(baseMass = self.LOAD_MASSES[i],
+                                                    baseCollisionShapeIndex = self.LOAD_COLLIDERS[i],
+                                                    baseVisualShapeIndex = -1,
+                                                    basePosition = self.INIT_XYZS[i + self.NUM_DRONES, :],
+                                                    baseOrientation = p.getQuaternionFromEuler(self.INIT_RPYS[i + self.NUM_DRONES, :]),
+                                                    ) for i in range(self.NUM_LOADS)])
+        constraint = p.createConstraint(self.DRONE_IDS[0], -1, self.LOAD_IDS[0], -1,
+                                jointType=p.JOINT_POINT2POINT,
+                                jointAxis=[1,0,0],
+                                parentFramePosition=[0,0,0.01],
+                                childFramePosition=[0,0,0.15])
         for i in range(self.NUM_DRONES):
             #### Show the frame of reference of the drone, note that ###
             #### It severly slows down the GUI #########################
