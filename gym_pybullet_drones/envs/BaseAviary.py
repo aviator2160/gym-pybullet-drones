@@ -1,3 +1,5 @@
+from mimetypes import init
+from ntpath import join
 import os
 from sys import platform
 import time
@@ -20,7 +22,10 @@ class DroneModel(Enum):
     CF2P = "cf2p"   # Bitcraze Craziflie 2.0 in the + configuration
     HB = "hb"       # Generic quadrotor (with AscTec Hummingbird inertial properties)
 
-class BoxModel():
+################################################################################
+
+class PayloadObject():
+
     def __init__(self, mass, dims, hardpoints):
         self.mass = mass
         self.dims = dims
@@ -28,8 +33,47 @@ class BoxModel():
         squared_dims = np.square(dims)
         self.J = mass / 12 * (np.eye(3) * np.sum(squared_dims) - np.diag(squared_dims))
 
-    def makeCollider():
-        pass
+    def makeCollider(self):
+        return p.createCollisionShape(p.GEOM_BOX, halfExtents = self.dims / 2)
+    
+    def makeBody(self, init_xyz, init_rpy, collider=None):
+        if collider is None:
+            collider = self.makeCollider()
+        return p.createMultiBody(baseMass = self.mass,
+                                 baseCollisionShapeIndex = collider,
+                                 baseVisualShapeIndex = -1,
+                                 basePosition = init_xyz,
+                                 baseOrientation = p.getQuaternionFromEuler(init_rpy))
+
+class Joint:
+    
+    def __init__(self, drone, load, hardpoint_pos, offset_from_drone):
+        self.drone = drone
+        self.load = load
+        self.hardpoint_pos = hardpoint_pos
+        self.offset_from_drone = offset_from_drone
+
+    def makeConstraint(self, drone_id, load_id):
+        return p.createConstraint(drone_id, -1, load_id, -1,
+                                  jointType=p.JOINT_POINT2POINT,
+                                  jointAxis=[1,0,0],
+                                  parentFramePosition=self.offset_from_drone,
+                                  childFramePosition=self.hardpoint_pos)
+
+def jointFactory(joints, num_drones, init_xyzs, load_desc):
+    joints_made = [None] * len(joints)
+    for (i,j) in enumerate(joints):
+        drone = j[0]
+        load = j[1]
+        hardpoint = j[2]
+        load_params = load_desc[load]
+        hardpoint_pos = load_params.hardpoints[hardpoint]
+        offset_from_drone = init_xyzs[load + num_drones] - init_xyzs[drone] + hardpoint_pos
+        joints_made[i] = Joint(drone, load, hardpoint_pos, offset_from_drone)
+    return joints_made
+
+
+
 
 ################################################################################
 
@@ -55,14 +99,6 @@ class ImageType(Enum):
 
 ################################################################################
 
-class Joint:
-    
-    def __init__(self, hardpoint, drone):
-        self.HARDPOINT = hardpoint
-        self.DRONE = drone
-
-################################################################################
-
 class BaseAviary(gym.Env):
     """Base class for "drone aviary" Gym environments."""
 
@@ -77,10 +113,8 @@ class BaseAviary(gym.Env):
                  neighbourhood_radius: float=np.inf,
                  initial_xyzs=None,
                  initial_rpys=None,
-                 load_dims=None,
-                 load_hardpoints=None,
-                 load_masses=None,
-                 joints: Joint=None,
+                 loads=None,
+                 joints=None,
                  physics: Physics=Physics.PYB,
                  freq: int=240,
                  aggregate_phy_steps: int=1,
@@ -104,13 +138,11 @@ class BaseAviary(gym.Env):
         neighbourhood_radius : float, optional
             Radius used to compute the drones' adjacency matrix, in meters.
         initial_xyzs: ndarray | None, optional
-            (NUM_DRONES, 3)-shaped array containing the initial XYZ position of the drones.
+            (num_drones + num_loads, 3)-shaped array containing the initial XYZ position of the drones.
         initial_rpys: ndarray | None, optional
-            (NUM_DRONES, 3)-shaped array containing the initial orientations of the drones (in radians).
-        load_dims: ndarray | None, optional
-            (NUM_LOADS, 3)-shaped array containing the xyz-dimensions of the loads in meters.
-        initial_hardpoints: ndarray | None, optional
-            (NUM_LOADS, 3)-shaped array containing the positions of the load hardpoints in meters, w.r.t their centers.
+            (num_drones + num_loads, 3)-shaped array containing the initial orientations of the drones (in radians).
+        loads: list of PayloadObject | None, optional
+            (num_loads, 3)-shaped array containing the list of PayloadObjects in the scene.
         physics : Physics, optional
             The desired implementation of PyBullet physics/custom dynamics.
         freq : int, optional
@@ -139,11 +171,12 @@ class BaseAviary(gym.Env):
         self.TIMESTEP = 1./self.SIM_FREQ
         self.AGGR_PHY_STEPS = aggregate_phy_steps
         #### Defaults ##############################################
-        default_load_dims = np.array([0.5, 0.5, 0.1])
-        default_hardpoints = np.array([[ 0.5,  0.5, 0.1],
-                              [-0.5,  0.5, 0.1],
-                              [-0.5, -0.5, 0.1],
-                              [ 0.5, -0.5 ,0.1]])
+        default_load_mass = 1,
+        default_load_dims =np.array([0.5, 0.5, 0.1]),
+        default_load_hardpoints =np.array([[ 0.5,  0.5, 0.1],
+                                          [-0.5,  0.5, 0.1],
+                                          [-0.5, -0.5, 0.1],
+                                          [ 0.5, -0.5 ,0.1]]),
         #### Parameters ############################################
         self.NUM_DRONES = num_drones
         self.NUM_LOADS = num_loads
@@ -274,26 +307,19 @@ class BaseAviary(gym.Env):
             self.INIT_RPYS = initial_rpys
         else:
             print("[ERROR] invalid initial_rpys in BaseAviary.__init__(), try initial_rpys.reshape(NUM_OBJS,3)")
-        #### Set initial load dimensions #################################
-        # TODO: Better defaults
-        if load_dims is None:
+        #### Set initial load objects ##############################
+        if loads is None:
             if self.NUM_LOADS > 0:
-                self.LOAD_DIMS = np.array([default_load_dims for i in range(self.NUM_LOADS)])
+                self.LOADS = [PayloadObject(default_load_mass, default_load_dims, default_load_hardpoints) for i in range(self.NUM_LOADS)]
             else:
-                self.LOAD_DIMS = np.array([[]])
+                self.LOADS = []
         else:
-            self.LOAD_DIMS = load_dims
-        if load_hardpoints is None:
-            if self.NUM_LOADS > 0:
-                self.LOAD_HARDPOINTS = [default_hardpoints for i in range(self.NUM_LOADS)]
-            else:
-                self.LOAD_HARDPOINTS = np.array([[[]]])
+            self.LOADS = loads
+        #### Set initial constraint objects ########################
+        if joints is None:
+            self.JOINTS = []
         else:
-            self.LOAD_HARDPOINTS = load_hardpoints
-        if load_masses is None:
-            self.LOAD_MASSES = np.product(self.LOAD_DIMS, axis=1)
-        else:
-            self.LOAD_MASSES = load_masses
+            self.JOINTS = joints
         #### Create action and observation spaces ##################
         self.action_space = self._actionSpace()
         self.observation_space = self._observationSpace()
@@ -547,20 +573,11 @@ class BaseAviary(gym.Env):
                                               flags = p.URDF_USE_INERTIA_FROM_FILE,
                                               physicsClientId=self.CLIENT
                                               ) for i in range(self.NUM_DRONES)])
-        self.LOAD_COLLIDERS = np.array([p.createCollisionShape(p.GEOM_BOX,
-                                                               halfExtents = self.LOAD_DIMS[i, :]/2,
-                                                              ) for i in range(self.NUM_LOADS)])
-        self.LOAD_IDS = np.array([p.createMultiBody(baseMass = self.LOAD_MASSES[i],
-                                                    baseCollisionShapeIndex = self.LOAD_COLLIDERS[i],
-                                                    baseVisualShapeIndex = -1,
-                                                    basePosition = self.INIT_XYZS[i + self.NUM_DRONES, :],
-                                                    baseOrientation = p.getQuaternionFromEuler(self.INIT_RPYS[i + self.NUM_DRONES, :]),
-                                                    ) for i in range(self.NUM_LOADS)])
-        constraint = p.createConstraint(self.DRONE_IDS[0], -1, self.LOAD_IDS[0], -1,
-                                jointType=p.JOINT_POINT2POINT,
-                                jointAxis=[1,0,0],
-                                parentFramePosition=[0,0,0.01],
-                                childFramePosition=[0,0,0.15])
+        self.LOAD_IDS = np.array([self.LOADS[i].makeBody(init_xyz=self.INIT_XYZS[i + self.NUM_DRONES, :],
+                                                         init_rpy=self.INIT_RPYS[i + self.NUM_DRONES, :],
+                                                        ) for i in range(self.NUM_LOADS)])
+        self.JOINT_IDS = np.array([j.makeConstraint(drone_id=self.DRONE_IDS[j.drone], load_id=self.LOAD_IDS[j.load])
+                                   for j in self.JOINTS])
         for i in range(self.NUM_DRONES):
             #### Show the frame of reference of the drone, note that ###
             #### It severly slows down the GUI #########################

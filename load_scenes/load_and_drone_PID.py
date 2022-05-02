@@ -22,10 +22,10 @@ sys.path.append('../')
 import os
 print(os.path.dirname)
 
+from gym_pybullet_drones.envs.BaseAviary import PayloadObject, jointFactory
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.utils.Logger import Logger
 from gym_pybullet_drones.utils.utils import sync
-from assignments.aer1216_fall2020_hw1_ctrl import HW1Control
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 
 DURATION = 10
@@ -33,16 +33,33 @@ DURATION = 10
 GUI = True
 """bool: Whether to use PyBullet graphical interface."""
 
-INIT_XYZS = np.array([[0, 0, 1],
-                      [0, 0, 0.8],])
-LOAD_DIMS = np.array([[0.2, 0.2, 0.05]])
-LOAD_HARDPOINTS = np.array([[[]]])
-LOAD_MASSES = [0.01]
+NUM_DRONES = 4
+NUM_LOADS = 1
+
+INIT_XYZS = np.array([[ 0.1,    0,   1],
+                      [   0,  0.1,   1],
+                      [-0.1,    0,   1],
+                      [   0, -0.1,   1],
+                      [   0,    0, 0.9],])
+
+LOADS = [PayloadObject(mass=0.01,
+                       dims=np.array([0.2, 0.2, 0.1]),
+                       hardpoints=np.array([[ 0.1,    0, 0.05],
+                                            [   0,  0.1, 0.05],
+                                            [-0.1,    0, 0.05],
+                                            [   0, -0.1, 0.05],]),
+                      ),]
+
+JOINTS = jointFactory(joints=[[0,0,0],
+                              [1,0,1],
+                              [2,0,2],
+                              [3,0,3],],
+                      num_drones=NUM_DRONES, init_xyzs=INIT_XYZS, load_desc=LOADS)
 
 if __name__ == "__main__":
 
     #### Create the ENVironment ################################
-    ENV = CtrlAviary(initial_xyzs=INIT_XYZS, num_loads=1, load_dims=LOAD_DIMS, load_hardpoints=LOAD_HARDPOINTS, load_masses=LOAD_MASSES, gui=GUI)
+    ENV = CtrlAviary(num_drones=NUM_DRONES, num_loads=NUM_LOADS, initial_xyzs=INIT_XYZS, loads=LOADS, joints=JOINTS, gui=GUI)
     PYB_CLIENT = ENV.getPyBulletClient()
 
     #### Initialize the LOGGER #################################
